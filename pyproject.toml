@@ -1,0 +1,50 @@
+[project]
+name = "agentic-rag-legal"
+version = "0.1.0"
+description = "Agentic RAG over dense, cross-referencing legal contracts"
+requires-python = ">=3.11"
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sse-starlette>=2.1",
+    "langgraph>=0.2.45",
+    "langchain-core>=0.3.15",
+    "qdrant-client>=1.12",
+    "motor>=3.6",
+    "pymongo>=4.9",
+    "rank-bm25>=0.2.2",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+# LLM / embedding providers. Install only the ones you actually use.
+openai = ["openai>=1.54"]
+anthropic = ["anthropic>=0.39"]
+voyage = ["voyageai>=0.3"]
+cohere = ["cohere>=5.11"]
+# Local cross-encoder reranker (bge-reranker-large). Heavy: pulls torch.
+local-rerank = ["sentence-transformers>=3.2"]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+]
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

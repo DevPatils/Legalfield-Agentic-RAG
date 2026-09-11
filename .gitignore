@@ -5,3 +5,25 @@
 
 # Claude Code local guidance
 CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+
+# Corpus + build artifacts (regenerate via scripts/)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Downloaded corpus cache (regenerate via scripts/fetch_cuad.py)
+data/.cache/
