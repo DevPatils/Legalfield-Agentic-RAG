@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from app.config import get_settings  # noqa: E402
 from app.embeddings.provider import get_embedding_provider  # noqa: E402
+from app.embeddings.ratelimit import estimate_tokens  # noqa: E402
 from app.ingest.chunker import load_chunks  # noqa: E402
 from app.storage.qdrant_store import QdrantStore  # noqa: E402
 
@@ -54,20 +56,41 @@ def main() -> int:
         print(f"\nDry run -- nothing embedded or written.\nFirst embedding input:\n{sample[:400]}")
         return 0
 
-    embedder = get_embedding_provider(settings)
+    texts = [embedding_text(c) for c in chunks]
+    embedder = get_embedding_provider(settings, progress=lambda msg: print(f"  {msg}"))
+
+    # Use the provider's own tokenizer for the estimate where it has one, so the
+    # reported ETA matches what the server will actually meter.
+    if hasattr(embedder, "count_tokens_batch"):
+        print("Counting tokens with the provider tokenizer...")
+        total_tokens = sum(embedder.count_tokens_batch(texts))
+    else:
+        total_tokens = sum(estimate_tokens(t) for t in texts)
+    minutes = total_tokens / max(settings.embed_max_tpm, 1)
+    print(
+        f"{total_tokens:,} tokens at {settings.embed_max_tpm:,} TPM / "
+        f"{settings.embed_max_rpm} RPM -> approx {minutes:.0f} min"
+    )
+
     store = QdrantStore(settings)
 
     print(f"Recreating collection {settings.qdrant_collection!r} (dim={embedder.dim})")
     store.recreate_collection(embedder.dim)
 
-    texts = [embedding_text(c) for c in chunks]
+    started = time.time()
+    done = 0
+    # Outer batching stays item-based for Qdrant writes; the provider re-batches
+    # internally against the token ceiling before it calls the API.
     for start in range(0, len(chunks), args.batch):
         batch = chunks[start : start + args.batch]
         vectors = embedder.embed(texts[start : start + args.batch])
         store.upsert(batch, vectors)
-        print(f"\r  indexed {min(start + args.batch, len(chunks))}/{len(chunks)}", end="")
+        done += len(batch)
+        rate = done / max(time.time() - started, 1e-6)
+        eta = (len(chunks) - done) / rate / 60 if rate else 0
+        print(f"  indexed {done}/{len(chunks)}  ({eta:.0f} min left)", flush=True)
 
-    print(f"\nDone. Collection holds {store.count()} points.")
+    print(f"Done in {(time.time() - started) / 60:.1f} min. Collection holds {store.count()}.")
     return 0
 
 

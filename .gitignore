@@ -27,3 +27,6 @@ data/processed/*
 
 # Downloaded corpus cache (regenerate via scripts/fetch_cuad.py)
 data/.cache/
+
+# Indexing run log
+index.log

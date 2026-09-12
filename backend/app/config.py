@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     voyage_api_key: str = ""
     openai_api_key: str = ""
 
+    # Voyage throttles accounts with no payment method to 3 RPM / 10K TPM (the 200M
+    # free tokens still apply -- it is a rate cap, not a volume cap). Adding a card
+    # lifts this to the standard limits; raise these to match if you do.
+    embed_max_rpm: int = 3
+    embed_max_tpm: int = 10_000
+
     rerank_provider: str = "cohere"  # cohere | local | none
     cohere_api_key: str = ""
 
