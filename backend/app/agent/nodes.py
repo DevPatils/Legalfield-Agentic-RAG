@@ -11,14 +11,16 @@ import re
 import time
 from typing import Any
 
+from ..ingest.models import make_chunk_id
+from ..ingest.roster import resolve_doc
 from ..retrieval.pipeline import RetrievedChunk
 from .deps import AgentDeps
 from .prompts import (
     FAITHFULNESS_SYSTEM,
     GENERATE_SYSTEM,
-    PLANNER_SYSTEM,
     REWRITE_SYSTEM,
     SUFFICIENCY_SYSTEM,
+    planner_system,
 )
 from .schemas import (
     FaithfulnessOutput,
@@ -37,7 +39,29 @@ from .state import (
 # Matches the citation contract in GENERATE_SYSTEM: [doc_001 §4.2]
 RE_CITATION = re.compile(r"\[([A-Za-z0-9_\-]+)\s*§\s*([^\]\s]+)\]")
 
+# A section the user named directly: "section 2.2.2", "§ 4.1", or a bare "2.2.2".
+RE_NAMED_SECTION = re.compile(
+    r"(?:(?:section|clause|article|§)\s*)?(\d+(?:\.\d+)+(?:\([A-Za-z0-9]{1,4}\))*)",
+    re.I,
+)
+
 MAX_CONTEXT_CHUNKS = 12
+
+
+def sections_named_in(query: str) -> list[str]:
+    """Section numbers the user asked for by name.
+
+    Naming a section is a lookup, not a search: "2.2.2" and "2.2.3" are adjacent
+    strings in embedding space and unrelated clauses in the document, so semantic
+    retrieval on a bare number is close to a coin flip. Requires at least one dot so
+    plain quantities ("30 days", "5 years") are not mistaken for clause numbers.
+    """
+    out: list[str] = []
+    for match in RE_NAMED_SECTION.finditer(query):
+        section_id = match.group(1)
+        if section_id not in out:
+            out.append(section_id)
+    return out
 
 
 def format_clauses(chunks: list[RetrievedChunk]) -> str:
@@ -65,7 +89,7 @@ def make_planner(deps: AgentDeps):
         query = state["raw_query"]
         try:
             out = deps.llm.parse(
-                system=PLANNER_SYSTEM,
+                system=planner_system(deps.roster_text),
                 user=f"Question: {query}",
                 schema=PlannerOutput,
                 node="planner",
@@ -84,11 +108,27 @@ def make_planner(deps: AgentDeps):
             }
 
         sub_queries = [q.strip() for q in out.sub_queries if q.strip()] or [query]
+        known = {d.doc_id for d in deps.roster}
+
+        # The model's pick is trusted only if it names a real document; otherwise fall
+        # back to matching the question against the roster ourselves.
+        doc_id = out.doc_id if out.doc_id in known else resolve_doc(deps.roster, query)
+
+        # Belt and braces over the prompt: naming a document or a section number is
+        # objective evidence the question is about contract content, whatever the
+        # model concluded. Refusing such a question is never the right call.
+        names_section = bool(sections_named_in(query))
+        needs_retrieval = out.needs_retrieval or doc_id is not None or names_section
+        query_type = out.query_type
+        if query_type == "out_of_scope" and (doc_id is not None or names_section):
+            query_type = "overview"
+
         return {
-            "query_type": out.query_type,
-            "needs_retrieval": out.needs_retrieval,
-            "sub_queries": sub_queries if out.needs_retrieval else [],
-            "active_queries": sub_queries if out.needs_retrieval else [],
+            "query_type": query_type,
+            "needs_retrieval": needs_retrieval,
+            "doc_id": doc_id or state.get("doc_id"),
+            "sub_queries": sub_queries if needs_retrieval else [],
+            "active_queries": sub_queries if needs_retrieval else [],
             "planner_reasoning": out.reasoning,
         }
 
@@ -105,6 +145,22 @@ def make_retrieve(deps: AgentDeps):
         doc_id = state.get("doc_id")
         found: list[RetrievedChunk] = []
 
+        # If the user named a section of a known document, fetch it by id first.
+        # Searching for "Section 2.2.2" semantically tends to return 2.2.1 or the
+        # same number from a different agreement; constructing the key does not.
+        named: list[str] = []
+        if doc_id and state.get("iteration", 0) == 0:
+            wanted = [
+                make_chunk_id(doc_id, section_id)
+                for section_id in sections_named_in(state["raw_query"])
+            ]
+            if wanted:
+                direct = deps.pipeline.fetch_by_ids(wanted)
+                for chunk in direct:
+                    chunk.source = "direct_lookup"
+                found.extend(direct)
+                named = [c.section_id for c in direct]
+
         for sub_query in state.get("active_queries") or [state["raw_query"]]:
             try:
                 found.extend(deps.pipeline.retrieve(sub_query, config, doc_id=doc_id))
@@ -119,6 +175,7 @@ def make_retrieve(deps: AgentDeps):
             "iteration": iteration,
             "trigger": state.get("refine_strategy", "none"),
             "sub_queries": list(state.get("active_queries", [])),
+            "direct_lookups": named,
             "retrieved_chunks": [c.to_trace() for c in found],
             "latency_ms": elapsed,
         }
@@ -309,10 +366,16 @@ def make_generate(deps: AgentDeps):
 
         if not state.get("needs_retrieval", True):
             return {
-                "final_answer": (
-                    "That question is outside what these contracts cover. I can answer "
-                    "questions about the clauses in the indexed agreements -- "
-                    "obligations, definitions, termination, payment terms and the like."
+                "final_answer": "\n".join(
+                    [
+                        "I can only answer from the clauses in the indexed agreements.",
+                        "The corpus holds these contracts:",
+                        "",
+                        deps.roster_text,
+                        "",
+                        "Ask about obligations, definitions, termination, payment terms "
+                        "or cross-references in any of them.",
+                    ]
                 ),
                 "citations": [],
                 "unverified_citations": [],

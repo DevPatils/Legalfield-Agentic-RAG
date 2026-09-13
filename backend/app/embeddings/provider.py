@@ -84,18 +84,31 @@ class VoyageEmbeddings:
             if self.limiter:
                 self.limiter.acquire(cost, on_wait=self._note_wait)
 
-            for attempt in range(6):
+            # A full pass takes over an hour at the free-tier cap, so a transient
+            # network drop part-way through is a realistic event. Retrying the batch
+            # costs seconds; letting the exception escape costs the whole run.
+            transient = (
+                voyageai.error.RateLimitError,
+                voyageai.error.APIConnectionError,
+                voyageai.error.ServiceUnavailableError,
+                voyageai.error.Timeout,
+            )
+            # Patience is close to free here: the run is already rate-capped, and the
+            # alternative to waiting is aborting a job with an hour of work behind it.
+            # The limiter's window is per-process, so a resumed run starts blind to
+            # requests the previous process made, and the server can throttle for
+            # several minutes until those age out.
+            for attempt in range(14):
                 try:
                     result = self.client.embed(batch, model=self.model, input_type=input_type)
                     break
-                except voyageai.error.RateLimitError:
-                    # The limiter estimates token cost; the server counts exactly.
-                    # Back off and retry rather than losing the batch.
-                    delay = min(60, 5 * 2**attempt)
-                    self._note_wait(delay)
+                except transient as exc:
+                    kind = type(exc).__name__
+                    delay = min(120, 5 * 2**attempt)
+                    self._note_wait_labelled(delay, kind)
                     time.sleep(delay)
             else:
-                raise RuntimeError("Voyage rate limit persisted after 6 retries.")
+                raise RuntimeError("Voyage kept failing after 14 retries; run again to resume.")
 
             for slot, vector in zip(indices, result.embeddings, strict=True):
                 out[slot] = vector
@@ -104,6 +117,10 @@ class VoyageEmbeddings:
     def _note_wait(self, seconds: float) -> None:
         if self.progress:
             self.progress(f"rate limit: waiting {seconds:.0f}s")
+
+    def _note_wait_labelled(self, seconds: float, kind: str) -> None:
+        if self.progress:
+            self.progress(f"{kind}: retrying in {seconds:.0f}s")
 
 
 class OpenAIEmbeddings:
@@ -133,13 +150,17 @@ def get_embedding_provider(
     if provider == "voyage":
         if not settings.voyage_api_key:
             raise RuntimeError("EMBEDDING_PROVIDER=voyage but VOYAGE_API_KEY is unset.")
+        # Size each request at roughly TPM / RPM, so the allowed number of requests
+        # per minute adds up to the token budget and no single request can consume it.
+        # Sizing to a large fraction of TPM instead means one request nearly exhausts
+        # the minute, and any undercount in the local estimate trips a server refusal
+        # -- which then costs a full backoff cycle and, repeated, stalls the run.
+        per_request = settings.embed_max_tpm / max(settings.embed_max_rpm, 1)
         return VoyageEmbeddings(
             settings.voyage_api_key,
             settings.embedding_model,
             limiter=RateLimiter(settings.embed_max_rpm, settings.embed_max_tpm),
-            # Leave headroom under the per-minute ceiling so one request never
-            # consumes the entire budget on its own.
-            max_request_tokens=max(1_000, int(settings.embed_max_tpm * 0.8)),
+            max_request_tokens=max(1_000, int(per_request * 0.9)),
             progress=progress,
         )
     if provider == "openai":

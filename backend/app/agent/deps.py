@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from ..config import Settings, get_settings
 from ..embeddings.provider import EmbeddingProvider, get_embedding_provider
+from ..ingest.roster import DocumentInfo, format_roster, load_roster
 from ..retrieval.bm25 import BM25Index
 from ..retrieval.pipeline import RetrievalConfig, RetrievalPipeline
 from ..retrieval.rerank import Reranker, get_reranker
@@ -28,6 +29,11 @@ class AgentDeps:
     llm: LLMClient
     usage: UsageLog
     pipeline: RetrievalPipeline
+    roster: tuple[DocumentInfo, ...] = ()
+
+    @property
+    def roster_text(self) -> str:
+        return format_roster(self.roster)
 
     def retrieval_config(self) -> RetrievalConfig:
         return RetrievalConfig(
@@ -64,4 +70,5 @@ def build_deps(settings: Settings | None = None) -> AgentDeps:
         llm=llm,
         usage=usage,
         pipeline=RetrievalPipeline(store, embedder, bm25, reranker, settings),
+        roster=load_roster(settings.raw_dir / "manifest.json"),
     )

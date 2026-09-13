@@ -35,10 +35,94 @@ RE_CAPS_HEADING = re.compile(r"^\s*([A-Z][A-Z0-9 ,'&()\-/]{2,79})\.?\s*$")
 
 RE_ROMAN = re.compile(r"^(?=[ivxlcdm]+$)m*(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})$")
 
-# Page furniture that shows up in CUAD text dumps.
+# Page furniture that shows up in CUAD text dumps. "Source: ACME CORP, 10-K, 3/12/2020"
+# is a footer the scraper stamps on every page, not contract text.
 RE_PAGE_ARTIFACT = re.compile(
-    r"^\s*(?:page\s+\d+\s*(?:of\s*\d+)?|-\s*\d+\s*-|\[?page\s*break\]?|_{3,}|\f)\s*$", re.I
+    r"^\s*(?:page\s+\d+\s*(?:of\s*\d+)?"
+    r"|[-–—]\s*[ivxlcdm\d]{1,6}\s*[-–—]"  # "- 14 -" and roman "- iii -"
+    r"|\[?page\s*break\]?|_{3,}|\f"
+    r"|source:\s*.{0,80}?\d{1,2}/\d{1,2}/\d{2,4}\s*)\s*$",
+    re.I,
 )
+
+# --- Table-of-contents detection -------------------------------------------------
+#
+# Contracts open with a TOC, and left in place it does real damage rather than merely
+# adding noise: the TOC entry for "2.1" is parsed first and claims that section id, so
+# the *real* 2.1 is deduplicated to "2.1~2" -- and then the real sub-sections (2.1.1,
+# 2.1.2) look up their parent, find the TOC node, and attach to it. The document tree
+# ends up rooted in its own table of contents, with broken paths and empty chunks.
+#
+# Skipping the region before parsing fixes every one of those at once.
+
+RE_TOC_HEADING = re.compile(r"^\s*TABLE\s+OF\s+CONTENTS\s*$", re.I)
+
+# "2.1 Joint Governance Committee. 18" -- a numbered entry ending in a page number.
+RE_TOC_ENTRY = re.compile(r"\d+(?:\.\d+)*\.?\s+[A-Z][^.\n]{2,70}\.?\s+\d{1,3}(?!\d)")
+# "ARTICLE 1 DEFINITIONS 1" -- article entry with a trailing page number.
+RE_TOC_ARTICLE = re.compile(r"^\s*ARTICLE\s+[IVXLC0-9]+\s+[A-Z][^.\n]{2,70}?\s+\d{1,3}\s*$", re.I)
+
+# How far into the document a TOC can plausibly start.
+TOC_SEARCH_FRACTION = 0.4
+MIN_TOC_ENTRIES = 4
+# Ends the region after this many consecutive *non-blank* non-TOC lines. Blank lines
+# are not counted: extracted TOCs are full of them, and counting them truncated the
+# span mid-table, leaving the rest of the listing to be parsed as clauses.
+TOC_GAP_TOLERANCE = 6
+
+
+def _is_toc_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if RE_TOC_HEADING.match(stripped) or RE_TOC_ARTICLE.match(stripped):
+        return True
+    # A body line can mention one section number; a TOC line packs several entries,
+    # each trailed by a page number.
+    return len(RE_TOC_ENTRY.findall(stripped)) >= 1 and bool(
+        re.search(r"\s\d{1,3}\s*$|\.\s+\d{1,3}\s", stripped)
+    )
+
+
+def find_toc_span(lines: list[str]) -> tuple[int, int] | None:
+    """Locate the table-of-contents region as ``(start, end)`` line indices, inclusive.
+
+    Returns None when the document has no TOC, which many exhibits do not.
+    """
+    horizon = max(30, int(len(lines) * TOC_SEARCH_FRACTION))
+    candidates = [i for i in range(min(horizon, len(lines))) if _is_toc_line(lines[i])]
+    if len(candidates) < MIN_TOC_ENTRIES:
+        return None
+
+    # Take the first run of candidates, allowing small gaps for the article headings
+    # and stray page numbers that sit between entries.
+    start = candidates[0]
+    end = start
+    for index in candidates[1:]:
+        between = sum(1 for i in range(end + 1, index) if lines[i].strip())
+        if between <= TOC_GAP_TOLERANCE:
+            end = index
+        else:
+            break
+
+    if sum(1 for i in range(start, end + 1) if _is_toc_line(lines[i])) < MIN_TOC_ENTRIES:
+        return None
+
+    # Pull in an immediately preceding "TABLE OF CONTENTS" heading.
+    for i in range(max(0, start - 3), start):
+        if RE_TOC_HEADING.match(lines[i].strip()):
+            start = i
+            break
+    return start, end
+
+
+def strip_toc(lines: list[str]) -> list[str]:
+    """Remove the table-of-contents region, if there is one."""
+    span = find_toc_span(lines)
+    if span is None:
+        return lines
+    start, end = span
+    return lines[:start] + lines[end + 1 :]
 
 _ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
 
@@ -209,7 +293,7 @@ def parse_document(raw: str, doc_id: str) -> dict[str, Section]:
     ``body`` holds only the lines belonging to that node (children hold their own).
     """
     builder = _TreeBuilder(doc_id)
-    lines = normalize_text(raw)
+    lines = strip_toc(normalize_text(raw))
 
     # A numbered token only opens a new section if the *previous* line closed a
     # sentence (or was a bare heading). Without this, a wrapped line such as

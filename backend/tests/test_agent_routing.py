@@ -180,3 +180,96 @@ class TestInitialState:
         assert state["context"] == []
         assert state["refine_strategy"] == "none"
         assert state["low_confidence"] is False
+
+
+class TestNamedSectionDetection:
+    """Naming a section is objective evidence the question is about contract content,
+    and is what forces retrieval even when the planner wants to refuse."""
+
+    def test_finds_a_named_section(self):
+        from app.agent.nodes import sections_named_in
+
+        assert sections_named_in("what does section 2.2.2 say") == ["2.2.2"]
+
+    def test_finds_a_bare_dotted_number(self):
+        from app.agent.nodes import sections_named_in
+
+        assert sections_named_in("explain 2.2.2 please") == ["2.2.2"]
+
+    def test_finds_subclause_ids(self):
+        from app.agent.nodes import sections_named_in
+
+        assert sections_named_in("Section 4.2(a)") == ["4.2(a)"]
+
+    def test_finds_several(self):
+        from app.agent.nodes import sections_named_in
+
+        assert sections_named_in("compare 2.2.2 and 2.2.3") == ["2.2.2", "2.2.3"]
+
+    def test_ignores_quantities(self):
+        from app.agent.nodes import sections_named_in
+
+        # "thirty (30) days" must not read as a clause number.
+        assert sections_named_in("within thirty (30) days of closing") == []
+
+    def test_ignores_a_bare_integer(self):
+        from app.agent.nodes import sections_named_in
+
+        assert sections_named_in("what is section 8 about") == []
+
+
+class TestRosterResolution:
+    """The agent must connect a company name to a doc_id; chunk payloads carry only
+    opaque ids, so without this a named contract looks like an unknown subject."""
+
+    @staticmethod
+    def roster():
+        from app.ingest.roster import parse_source_file
+
+        files = [
+            ("HarpoonTherapeuticsInc_20200312_10-K_EX-10.18_Development Agreement.txt", "doc_001"),
+            ("KINGPHARMACEUTICALSINC_08_09_2006-EX-10.1-PROMOTION AGREEMENT.txt", "doc_004"),
+            (
+                "ZEBRATECHNOLOGIESCORP_04_16_2014-EX-10.1-INTELLECTUAL PROPERTY AGREEMENT.txt",
+                "doc_013",
+            ),
+        ]
+        return tuple(parse_source_file(name, doc_id) for name, doc_id in files)
+
+    def test_company_names_are_readable(self):
+        labels = {d.doc_id: d.company for d in self.roster()}
+        assert labels["doc_001"] == "Harpoon Therapeutics INC"
+        # Run-together ALL-CAPS filenames get segmented rather than left as one word.
+        assert labels["doc_004"] == "King Pharmaceuticals INC"
+        assert labels["doc_013"] == "Zebra Technologies CORP"
+
+    def test_agreement_kind_is_extracted(self):
+        kinds = {d.doc_id: d.kind for d in self.roster()}
+        assert kinds["doc_001"] == "Development Agreement"
+        assert kinds["doc_013"] == "Intellectual Property Agreement"
+
+    def test_resolves_a_spaced_query_to_a_runtogether_name(self):
+        from app.ingest.roster import resolve_doc
+
+        assert resolve_doc(self.roster(), "the King Pharmaceuticals deal") == "doc_004"
+
+    def test_resolves_a_camelcase_mention(self):
+        from app.ingest.roster import resolve_doc
+
+        assert resolve_doc(self.roster(), "explain HarpoonTherapeutics") == "doc_001"
+
+    def test_resolves_an_explicit_doc_id(self):
+        from app.ingest.roster import resolve_doc
+
+        assert resolve_doc(self.roster(), "tell me about doc_013") == "doc_013"
+
+    def test_generic_words_do_not_match(self):
+        from app.ingest.roster import resolve_doc
+
+        # "therapeutics" alone is shared across a pharma corpus and identifies nothing.
+        assert resolve_doc(self.roster(), "what do therapeutics companies agree") is None
+
+    def test_unrelated_question_resolves_to_nothing(self):
+        from app.ingest.roster import resolve_doc
+
+        assert resolve_doc(self.roster(), "what is confidential information") is None

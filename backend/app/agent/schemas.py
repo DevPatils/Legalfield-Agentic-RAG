@@ -11,7 +11,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-QueryType = Literal["definitional", "cross_referential", "comparative", "out_of_scope"]
+QueryType = Literal[
+    "definitional", "cross_referential", "comparative", "overview", "out_of_scope"
+]
 
 
 class PlannerOutput(BaseModel):
@@ -26,6 +28,11 @@ class PlannerOutput(BaseModel):
         default_factory=list,
         description="Compound questions split into independently answerable parts. "
         "A simple question yields exactly one sub-query.",
+    )
+    doc_id: str | None = Field(
+        default=None,
+        description="Set when the question names one indexed document, e.g. 'doc_001'. "
+        "Restricts retrieval to that agreement. Null when the question spans documents.",
     )
     reasoning: str = Field(default="", description="One sentence on the classification.")
 

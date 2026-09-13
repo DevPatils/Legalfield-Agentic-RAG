@@ -76,15 +76,70 @@ class QdrantStore:
         ):
             self.client.create_payload_index(self.collection, field, field_schema=schema)
 
-    def upsert(self, chunks: list[Chunk], vectors: list[list[float]]) -> None:
+    def ensure_collection(self, dim: int) -> bool:
+        """Create the collection if absent. Returns True if it already existed with
+        the right dimension, meaning stored vectors can be reused."""
+        if self.client.collection_exists(self.collection):
+            info = self.client.get_collection(self.collection)
+            existing_dim = info.config.params.vectors.size
+            if existing_dim == dim:
+                return True
+            # A different embedding model: old vectors are not comparable to new ones.
+            self.client.delete_collection(self.collection)
+        self.recreate_collection(dim)
+        return False
+
+    def existing_hashes(self) -> dict[str, str]:
+        """``{chunk_id: content_hash}`` for everything already indexed.
+
+        Lets a re-index skip chunks whose embedding input has not changed, which makes
+        an interrupted run resumable instead of a restart.
+        """
+        out: dict[str, str] = {}
+        offset = None
+        while True:
+            records, offset = self.client.scroll(
+                collection_name=self.collection,
+                limit=512,
+                offset=offset,
+                with_payload=["chunk_id", "content_hash"],
+                with_vectors=False,
+            )
+            for record in records:
+                payload = record.payload or {}
+                if payload.get("chunk_id"):
+                    out[payload["chunk_id"]] = payload.get("content_hash", "")
+            if offset is None:
+                return out
+
+    def delete_by_chunk_ids(self, chunk_ids: list[str]) -> None:
+        if not chunk_ids:
+            return
+        for i in range(0, len(chunk_ids), 256):
+            self.client.delete(
+                self.collection,
+                points_selector=models.PointIdsList(
+                    points=[point_id(cid) for cid in chunk_ids[i : i + 256]]
+                ),
+                wait=True,
+            )
+
+    def upsert(
+        self,
+        chunks: list[Chunk],
+        vectors: list[list[float]],
+        hashes: list[str] | None = None,
+    ) -> None:
         if len(chunks) != len(vectors):
             raise ValueError(f"{len(chunks)} chunks but {len(vectors)} vectors")
-        points = [
-            models.PointStruct(
-                id=point_id(chunk.chunk_id), vector=vector, payload=chunk.to_payload()
+        points = []
+        for i, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True)):
+            payload = chunk.to_payload()
+            if hashes:
+                payload["content_hash"] = hashes[i]
+            points.append(
+                models.PointStruct(id=point_id(chunk.chunk_id), vector=vector, payload=payload)
             )
-            for chunk, vector in zip(chunks, vectors, strict=True)
-        ]
         for i in range(0, len(points), 128):
             self.client.upsert(self.collection, points=points[i : i + 128], wait=True)
 

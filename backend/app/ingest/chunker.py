@@ -25,12 +25,37 @@ MAX_CHUNK_CHARS = 4000
 MIN_CHUNK_CHARS = 40
 
 
+# A container's own lead-in has to be worth retrieving on its own before it earns a
+# chunk; a stray line of whitespace or a trailing fragment does not.
+MIN_CONTAINER_CHARS = 60
+
+
+def _is_container(sections: dict[str, Section], section_id: str) -> bool:
+    node = sections[section_id]
+    return any(sections[c].kind in ("section", "article") for c in node.children)
+
+
 def _is_chunk_node(sections: dict[str, Section], section_id: str) -> bool:
     """A node becomes its own chunk if it has no numbered-section children."""
     node = sections[section_id]
     if node.kind == "subclause":
         return False
-    return not any(sections[c].kind in ("section", "article") for c in node.children)
+    return not _is_container(sections, section_id)
+
+
+def _container_lead_in(sections: dict[str, Section], section_id: str) -> str:
+    """A container section's own text, excluding its children.
+
+    Contracts routinely write a scope statement before the sub-sections it governs --
+    "2.2 General Provisions. The following apply to the JGC and survive termination."
+    followed by 2.2.1, 2.2.2. That lead-in is substantive, but it belongs to no leaf,
+    so without this it reaches no chunk at all and is silently unretrievable.
+    """
+    node = sections[section_id]
+    if node.kind == "subclause" or not _is_container(sections, section_id):
+        return ""
+    own = node.own_text()
+    return own if len(own) >= MIN_CONTAINER_CHARS else ""
 
 
 def _split_oversized(text: str, limit: int = MAX_CHUNK_CHARS) -> list[str]:
@@ -59,10 +84,20 @@ def build_chunks(raw: str, doc_id: str) -> list[Chunk]:
     # --- Pass 1: decide chunk boundaries and materialize text. ---
     chunks: list[Chunk] = []
     for section_id in sections:
-        if not _is_chunk_node(sections, section_id):
-            continue
         node = sections[section_id]
-        text = subtree_text(sections, section_id)
+
+        if _is_chunk_node(sections, section_id):
+            text = subtree_text(sections, section_id)
+        else:
+            # Container: emit only its own lead-in, so nothing is duplicated between
+            # it and the child chunks below it.
+            text = _container_lead_in(sections, section_id)
+            if not text:
+                continue
+
+        # A titled node with no text is parser residue, not a retrievable clause.
+        if not text.strip():
+            continue
         if len(text) < MIN_CHUNK_CHARS and not node.title:
             continue
         parts = _split_oversized(text)
