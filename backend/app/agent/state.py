@@ -45,6 +45,7 @@ class AgentState(TypedDict, total=False):
     refine_strategy: RefineStrategy
 
     # --- output ---
+    summary: str
     final_answer: str
     citations: list[dict[str, Any]]
     unverified_citations: list[str]
@@ -76,6 +77,7 @@ def new_state(
         active_queries=[],
         sections_needed=[],
         terms_needed=[],
+        summary="",
         citations=[],
         unverified_citations=[],
         low_confidence=False,

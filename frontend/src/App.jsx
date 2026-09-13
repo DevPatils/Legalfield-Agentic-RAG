@@ -132,6 +132,7 @@ export default function App() {
             {
               role: 'agent',
               queryId: query_id,
+              summary: final.summary || '',
               text: final.final_answer || '(no answer returned)',
               citations: final.citations || [],
               unverified: final.unverified_citations || [],
@@ -162,6 +163,7 @@ export default function App() {
         {
           role: 'agent',
           queryId,
+          summary: t.summary || '',
           text: t.final_answer || '(no answer stored)',
           citations: t.citations || [],
           unverified: t.unverified_citations || [],
@@ -252,7 +254,12 @@ export default function App() {
             ) : (
               <div className="msg" key={i}>
                 <div className="msg-agent">
-                  <Answer text={m.text} unverified={m.unverified} onOpenClause={openClause} />
+                  <Answer
+                    summary={m.summary}
+                    text={m.text}
+                    unverified={m.unverified}
+                    onOpenClause={openClause}
+                  />
                   {!m.error && (
                     <div className="answer-meta">
                       {m.replayed && <span className="badge">replayed</span>}

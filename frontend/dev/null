@@ -1,0 +1,295 @@
+import { Fragment, jsx, jsxs } from "react/jsx-runtime";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Answer from "./Answer";
+import TracePanel from "./TracePanel";
+import { getClause, getHealth, getHistory, getTrace, streamQuery } from "./api";
+const EXAMPLES = [
+  "How may this agreement be amended or waived?",
+  "What counts as Confidential Information?",
+  "Can the Joint Governance Committee waive compliance?",
+  "How do termination provisions differ across these agreements?"
+];
+function ClauseDrawer({ clause, onClose, onOpenClause }) {
+  if (!clause) return null;
+  const { loading, error, payload, docId, sectionId } = clause;
+  return /* @__PURE__ */ jsx("div", { className: "drawer-backdrop", onClick: onClose, children: /* @__PURE__ */ jsxs("aside", { className: "drawer", onClick: (e) => e.stopPropagation(), children: [
+    /* @__PURE__ */ jsx("button", { className: "drawer-close", onClick: onClose, children: "close" }),
+    /* @__PURE__ */ jsxs("div", { className: "path", children: [
+      docId,
+      " \xA7",
+      sectionId
+    ] }),
+    loading && /* @__PURE__ */ jsx("p", { className: "empty", children: "Loading clause\u2026" }),
+    error && /* @__PURE__ */ jsx("p", { className: "empty", children: error }),
+    payload && /* @__PURE__ */ jsxs(Fragment, { children: [
+      /* @__PURE__ */ jsx("h3", { children: payload.section_title || "(untitled)" }),
+      payload.path && /* @__PURE__ */ jsx("div", { className: "path", children: payload.path }),
+      /* @__PURE__ */ jsx("pre", { children: payload.text }),
+      (payload.cross_references || []).length > 0 && /* @__PURE__ */ jsxs(Fragment, { children: [
+        /* @__PURE__ */ jsx("div", { className: "pane-title", style: { marginTop: "1.25rem" }, children: "Cross-references" }),
+        /* @__PURE__ */ jsx("div", { className: "edge-list", children: payload.cross_references.map((ref, i) => /* @__PURE__ */ jsxs(
+          "button",
+          {
+            className: "cite",
+            onClick: () => onOpenClause(payload.doc_id, ref),
+            children: [
+              "\xA7",
+              ref
+            ]
+          },
+          ref + i
+        )) })
+      ] }),
+      (payload.defined_terms_used || []).length > 0 && /* @__PURE__ */ jsxs(Fragment, { children: [
+        /* @__PURE__ */ jsx("div", { className: "pane-title", style: { marginTop: "1rem" }, children: "Defined terms used" }),
+        /* @__PURE__ */ jsx("div", { className: "edge-list", children: payload.defined_terms_used.map((t) => /* @__PURE__ */ jsx("span", { className: "badge", children: t }, t)) })
+      ] })
+    ] })
+  ] }) });
+}
+export default function App() {
+  const [sessionId, setSessionId] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [trace, setTrace] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [input, setInput] = useState("");
+  const [health, setHealth] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [activeQuery, setActiveQuery] = useState(null);
+  const [clause, setClause] = useState(null);
+  const abortRef = useRef(null);
+  const messagesEnd = useRef(null);
+  const traceEnd = useRef(null);
+  useEffect(() => {
+    getHealth().then(setHealth).catch(() => setHealth({ status: "down" }));
+  }, []);
+  useEffect(() => {
+    messagesEnd.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+  useEffect(() => {
+    traceEnd.current?.scrollIntoView({ behavior: "smooth" });
+  }, [trace]);
+  const refreshHistory = useCallback((sid) => {
+    if (sid) getHistory(sid).then(setHistory).catch(() => {
+    });
+  }, []);
+  const openClause = useCallback(async (docId, sectionId) => {
+    setClause({ loading: true, docId, sectionId });
+    try {
+      const data = await getClause(docId, sectionId);
+      setClause({ docId, sectionId, payload: data.sections[0] });
+    } catch {
+      setClause({ docId, sectionId, error: `Could not load ${docId} \xA7${sectionId}` });
+    }
+  }, []);
+  const send = useCallback(
+    (text) => {
+      const question = (text ?? input).trim();
+      if (!question || running) return;
+      setInput("");
+      setTrace([]);
+      setActiveQuery(null);
+      setMessages((m) => [...m, { role: "user", text: question }]);
+      setRunning(true);
+      let final = {};
+      abortRef.current = streamQuery({
+        query: question,
+        sessionId,
+        onStart: ({ session_id, query_id }) => {
+          if (!sessionId) setSessionId(session_id);
+          setActiveQuery(query_id);
+        },
+        onNode: (node, state) => {
+          final = { ...final, ...state };
+          setTrace((t) => [...t, { node, state }]);
+        },
+        onDone: ({ query_id }) => {
+          setRunning(false);
+          setMessages((m) => [
+            ...m,
+            {
+              role: "agent",
+              queryId: query_id,
+              summary: final.summary || "",
+              text: final.final_answer || "(no answer returned)",
+              citations: final.citations || [],
+              unverified: final.unverified_citations || [],
+              faithfulness: final.faithfulness || {},
+              lowConfidence: final.low_confidence,
+              confidence: final.confidence,
+              iterations: final.iteration,
+              tokens: final.token_usage
+            }
+          ]);
+          refreshHistory(sessionId || final.session_id);
+        },
+        onError: (detail) => {
+          setRunning(false);
+          setMessages((m) => [...m, { role: "agent", text: `Request failed: ${detail}`, error: true }]);
+        }
+      });
+    },
+    [input, running, sessionId, refreshHistory]
+  );
+  const replay = useCallback(async (queryId) => {
+    try {
+      const t = await getTrace(queryId);
+      setActiveQuery(queryId);
+      setMessages([
+        { role: "user", text: t.raw_query },
+        {
+          role: "agent",
+          queryId,
+          summary: t.summary || "",
+          text: t.final_answer || "(no answer stored)",
+          citations: t.citations || [],
+          unverified: t.unverified_citations || [],
+          faithfulness: t.faithfulness || {},
+          lowConfidence: t.low_confidence,
+          confidence: t.confidence,
+          iterations: t.iteration,
+          tokens: t.token_usage,
+          replayed: true
+        }
+      ]);
+      const steps = [];
+      if (t.query_type) steps.push({ node: "planner", state: t });
+      (t.iterations || []).forEach((it) => {
+        steps.push({
+          node: it.trigger === "graph_traversal" ? "refine" : "retrieve",
+          state: { ...t, iterations: [it], refine_strategy: it.trigger }
+        });
+        if (it.sufficiency) {
+          steps.push({
+            node: "sufficiency",
+            state: {
+              sufficient: it.sufficiency.sufficient,
+              missing_info: it.sufficiency.missing,
+              sections_needed: it.sufficiency.sections_needed,
+              terms_needed: it.sufficiency.terms_needed
+            }
+          });
+        }
+      });
+      if (t.final_answer) steps.push({ node: "generate", state: t });
+      if (t.faithfulness) steps.push({ node: "faithfulness", state: t });
+      setTrace(steps);
+    } catch {
+    }
+  }, []);
+  const newChat = () => {
+    abortRef.current?.();
+    setMessages([]);
+    setTrace([]);
+    setActiveQuery(null);
+    setRunning(false);
+  };
+  return /* @__PURE__ */ jsxs("div", { className: "app", children: [
+    /* @__PURE__ */ jsxs("aside", { className: "sidebar", children: [
+      /* @__PURE__ */ jsxs("div", { className: "brand", children: [
+        /* @__PURE__ */ jsx("h1", { children: "Agentic RAG \u2014 Legal" }),
+        /* @__PURE__ */ jsxs("p", { children: [
+          /* @__PURE__ */ jsx("span", { className: `status-dot ${health?.status === "ok" ? "" : "off"}` }),
+          health?.status === "ok" ? `${health.chunks.toLocaleString()} clauses` : "backend offline"
+        ] })
+      ] }),
+      /* @__PURE__ */ jsx("button", { className: "new-chat", onClick: newChat, children: "New question" }),
+      /* @__PURE__ */ jsx("div", { className: "pane-head", children: /* @__PURE__ */ jsx("span", { className: "pane-title", children: "History" }) }),
+      /* @__PURE__ */ jsxs("div", { className: "pane-body", children: [
+        history.length === 0 && /* @__PURE__ */ jsx("div", { className: "empty", children: "No past questions yet." }),
+        history.map((h) => /* @__PURE__ */ jsxs(
+          "button",
+          {
+            className: `history-item${activeQuery === h.query_id ? " active" : ""}`,
+            onClick: () => replay(h.query_id),
+            children: [
+              h.raw_query,
+              /* @__PURE__ */ jsx("small", { children: "replay stored trace" })
+            ]
+          },
+          h.query_id
+        ))
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxs("main", { className: "chat-pane", children: [
+      /* @__PURE__ */ jsxs("div", { className: "messages", children: [
+        messages.length === 0 && /* @__PURE__ */ jsx("div", { className: "empty", children: "Ask about the indexed contracts \u2014 obligations, definitions, termination, payment terms. Every claim comes back cited to a clause." }),
+        messages.map(
+          (m, i) => m.role === "user" ? /* @__PURE__ */ jsx("div", { className: "msg", children: /* @__PURE__ */ jsx("div", { className: "msg-user", children: m.text }) }, i) : /* @__PURE__ */ jsx("div", { className: "msg", children: /* @__PURE__ */ jsxs("div", { className: "msg-agent", children: [
+            /* @__PURE__ */ jsx(
+              Answer,
+              {
+                summary: m.summary,
+                text: m.text,
+                unverified: m.unverified,
+                onOpenClause: openClause
+              }
+            ),
+            !m.error && /* @__PURE__ */ jsxs("div", { className: "answer-meta", children: [
+              m.replayed && /* @__PURE__ */ jsx("span", { className: "badge", children: "replayed" }),
+              m.lowConfidence && /* @__PURE__ */ jsx("span", { className: "badge warn", children: "low confidence" }),
+              m.faithfulness?.flagged?.length > 0 ? /* @__PURE__ */ jsxs("span", { className: "badge warn", children: [
+                m.faithfulness.flagged.length,
+                " claim(s) flagged"
+              ] }) : m.faithfulness?.claims_checked > 0 && /* @__PURE__ */ jsxs("span", { className: "badge ok", children: [
+                m.faithfulness.claims_checked,
+                " claims verified"
+              ] }),
+              m.unverified?.length > 0 && /* @__PURE__ */ jsxs("span", { className: "badge warn", children: [
+                m.unverified.length,
+                " bad citation(s)"
+              ] }),
+              /* @__PURE__ */ jsxs("span", { children: [
+                m.citations?.length || 0,
+                " citations"
+              ] }),
+              m.iterations != null && /* @__PURE__ */ jsxs("span", { children: [
+                m.iterations,
+                " iteration(s)"
+              ] }),
+              m.tokens?.input != null && /* @__PURE__ */ jsxs("span", { children: [
+                m.tokens.input,
+                "in / ",
+                m.tokens.output,
+                "out tokens"
+              ] })
+            ] })
+          ] }) }, i)
+        ),
+        /* @__PURE__ */ jsx("div", { ref: messagesEnd })
+      ] }),
+      /* @__PURE__ */ jsxs("div", { className: "composer", children: [
+        /* @__PURE__ */ jsxs("div", { className: "composer-row", children: [
+          /* @__PURE__ */ jsx(
+            "textarea",
+            {
+              id: "question-input",
+              value: input,
+              placeholder: "Ask about the contracts\u2026",
+              onChange: (e) => setInput(e.target.value),
+              onKeyDown: (e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  send();
+                }
+              }
+            }
+          ),
+          /* @__PURE__ */ jsx("button", { onClick: () => send(), disabled: running || !input.trim(), children: running ? "Working\u2026" : "Ask" })
+        ] }),
+        messages.length === 0 && /* @__PURE__ */ jsx("div", { className: "examples", children: EXAMPLES.map((q) => /* @__PURE__ */ jsx("button", { onClick: () => send(q), children: q }, q)) })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxs("aside", { className: "trace-pane", children: [
+      /* @__PURE__ */ jsxs("div", { className: "pane-head", children: [
+        /* @__PURE__ */ jsx("span", { className: "pane-title", children: "Reasoning trace" }),
+        running && /* @__PURE__ */ jsx("span", { className: "badge", children: "running" })
+      ] }),
+      /* @__PURE__ */ jsxs("div", { className: "pane-body", children: [
+        /* @__PURE__ */ jsx(TracePanel, { trace, running, onOpenClause: openClause }),
+        /* @__PURE__ */ jsx("div", { ref: traceEnd })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsx(ClauseDrawer, { clause, onClose: () => setClause(null), onOpenClause: openClause })
+  ] });
+}

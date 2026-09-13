@@ -365,13 +365,20 @@ def make_generate(deps: AgentDeps):
         context = state.get("context", [])[:MAX_CONTEXT_CHUNKS]
 
         if not state.get("needs_retrieval", True):
+            # Bulleted rather than the prompt's indented form: the answer renderer
+            # groups consecutive bullet lines into a list, and would otherwise run the
+            # fifteen roster lines together into one paragraph.
+            roster_lines = "\n".join(
+                f"- {line.strip()}" for line in deps.roster_text.splitlines() if line.strip()
+            )
             return {
+                "summary": "I answer only from the clauses in the fifteen indexed "
+                "agreements, so I cannot help with that one.",
                 "final_answer": "\n".join(
                     [
-                        "I can only answer from the clauses in the indexed agreements.",
                         "The corpus holds these contracts:",
                         "",
-                        deps.roster_text,
+                        roster_lines,
                         "",
                         "Ask about obligations, definitions, termination, payment terms "
                         "or cross-references in any of them.",
@@ -384,9 +391,13 @@ def make_generate(deps: AgentDeps):
 
         if not context:
             return {
+                "summary": "I could not find any clauses in the indexed contracts "
+                "relevant to that question.",
                 "final_answer": (
-                    "I could not find any clauses in the indexed contracts relevant to "
-                    "that question."
+                    "Retrieval returned nothing usable. The subject may not be covered "
+                    "by these fifteen agreements, or the wording may not match how the "
+                    "clauses are drafted -- try naming the company, the section number, "
+                    "or the legal term the contract would use."
                 ),
                 "citations": [],
                 "unverified_citations": [],
@@ -412,9 +423,10 @@ def make_generate(deps: AgentDeps):
                 node="generate",
                 max_tokens=2048,
             )
-            answer, confidence = out.answer, out.confidence
+            summary, answer, confidence = out.summary.strip(), out.answer, out.confidence
         except Exception as exc:  # noqa: BLE001
             return {
+                "summary": "",
                 "final_answer": f"Answer generation failed: {exc}",
                 "citations": [],
                 "unverified_citations": [],
@@ -425,10 +437,12 @@ def make_generate(deps: AgentDeps):
 
         # Cheap mechanical check before the LLM faithfulness pass: does every citation
         # tag name a chunk that was actually in context? (Architecture.md §7, node 5)
+        # The summary is checked on the same terms as the body: it is the line most
+        # readers will act on, so an unverifiable citation there matters most.
         in_context = {(c.doc_id, c.section_id): c for c in context}
         citations: list[dict[str, Any]] = []
         unverified: list[str] = []
-        for doc_id, section_id in RE_CITATION.findall(answer):
+        for doc_id, section_id in RE_CITATION.findall(f"{summary}\n\n{answer}"):
             key = (doc_id, section_id)
             tag = f"[{doc_id} §{section_id}]"
             if key in in_context:
@@ -453,6 +467,7 @@ def make_generate(deps: AgentDeps):
             )
 
         return {
+            "summary": summary,
             "final_answer": answer,
             "citations": citations,
             "unverified_citations": unverified,
@@ -467,7 +482,9 @@ def make_generate(deps: AgentDeps):
 
 def make_faithfulness(deps: AgentDeps):
     def faithfulness(state: AgentState) -> dict[str, Any]:
-        answer = state.get("final_answer", "")
+        # The summary carries claims like any other line, and is the one line a reader
+        # may act on without reading further -- so it is checked, not exempted.
+        answer = "\n".join(filter(None, [state.get("summary", ""), state.get("final_answer", "")]))
         citations = state.get("citations", [])
         if not answer or not citations:
             return {"faithfulness": {"claims_checked": 0, "flagged": [], "skipped": True}}
@@ -529,5 +546,20 @@ def make_faithfulness(deps: AgentDeps):
 
 
 def _split_sentences(text: str) -> list[str]:
-    """Split on sentence ends, without breaking on 'Section 4.2.' or '[doc §8.2].'"""
-    return [s for s in re.split(r"(?<=[.!?])\s+(?=[A-Z\"'“])", text) if s.strip()]
+    """Split into claims, without breaking on 'Section 4.2.' or '[doc §8.2].'
+
+    Lines are split first, then sentences within a line. Now that answers are written
+    as bullets, a line break is the stronger claim boundary: a bullet often has no
+    terminal full stop, and the next one starts with "- **Quorum**" rather than a
+    capital letter, so sentence splitting alone would fuse several bullets into one
+    claim and check them all against whichever clause the first one cited.
+    """
+    out: list[str] = []
+    for raw in text.split("\n"):
+        # Drop the bullet marker and the bold label's asterisks: the checker judges the
+        # claim, and the flagged-claim UI shows this text back to the user, so neither
+        # should carry markdown punctuation.
+        line = re.sub(r"^\s*[-*•]\s+", "", raw).replace("**", "").strip()
+        if line:
+            out += [s for s in re.split(r"(?<=[.!?])\s+(?=[A-Z\"'“])", line) if s.strip()]
+    return out

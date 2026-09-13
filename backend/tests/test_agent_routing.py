@@ -273,3 +273,40 @@ class TestRosterResolution:
         from app.ingest.roster import resolve_doc
 
         assert resolve_doc(self.roster(), "what is confidential information") is None
+
+
+# --- answer framing -------------------------------------------------------------
+
+
+def test_split_sentences_treats_each_bullet_as_its_own_claim():
+    """Answers are now written as labelled bullets. A bullet often has no terminal
+    full stop and the next starts with '- **', so sentence splitting alone would fuse
+    several bullets into one claim -- and check them all against the first one's
+    clause, which is exactly the per-citation guarantee this check exists to make."""
+    answer = (
+        "- **Quorum** -- requires representatives from each Party [doc_001 §2.2.2]\n"
+        "- **Voting** -- consensus of those present [doc_001 §2.2.2]\n"
+        "- **Attendance** -- non-members may attend but cannot vote [doc_001 §9.1]"
+    )
+    claims = _split_sentences(answer)
+    assert len(claims) == 3
+    assert claims[0].startswith("Quorum")
+    assert "**" not in claims[0]
+    assert claims[2].endswith("[doc_001 §9.1]")
+
+
+def test_split_sentences_still_splits_prose():
+    answer = (
+        "The Receiving Party must protect it [doc_001 §4.1]. "
+        "This does not apply to public information [doc_001 §4.2]."
+    )
+    assert len(_split_sentences(answer)) == 2
+
+
+def test_split_sentences_does_not_break_on_section_numbers():
+    """'Section 4.2.' ends in a full stop but is not a sentence boundary."""
+    answer = (
+        "Amendment requires written agreement under Section 4.2. "
+        "of the contract [doc_001 §4.2]."
+    )
+    assert len(_split_sentences(answer)) == 1

@@ -104,6 +104,7 @@ class MongoStore:
             "sections_needed",
             "terms_needed",
             "refine_strategy",
+            "summary",
             "final_answer",
             "citations",
             "unverified_citations",

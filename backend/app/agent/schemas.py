@@ -66,11 +66,21 @@ class RewrittenQuery(BaseModel):
 
 
 class GeneratedAnswer(BaseModel):
-    """Node 5: the answer, with citations required per claim."""
+    """Node 5: the answer, with citations required per claim.
 
+    ``summary`` is a separate field rather than the first line of ``answer`` so the UI
+    can guarantee a lead sentence exists and style it as one. Asking a model to "start
+    with a summary" inside free text produces one most of the time; a required field
+    produces one every time, and that is the difference between a layout and a hope.
+    """
+
+    summary: str = Field(
+        description="ONE sentence answering the question directly, with a citation. "
+        "The reader should be able to stop here and have the answer."
+    )
     answer: str = Field(
-        description="The answer. Every factual claim carries a citation tag in the "
-        "form [doc_id §section_id]."
+        description="The supporting detail. Every factual claim carries a citation tag "
+        "in the form [doc_id §section_id]."
     )
     citations_used: list[str] = Field(
         default_factory=list,

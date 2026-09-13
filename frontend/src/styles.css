@@ -155,10 +155,44 @@ button { font: inherit; cursor: pointer; }
   border-radius: 8px;
   padding: 1rem 1.1rem;
 }
-/* pre-wrap so single newlines survive: answers and the document roster use them
-   for line breaks, and collapsing them runs list items together. */
-.msg-agent p { margin: 0 0 0.75rem; white-space: pre-wrap; }
+.msg-agent p { margin: 0 0 0.75rem; }
 .msg-agent p:last-child { margin-bottom: 0; }
+
+/* The lead sentence. Set apart because the intended reading pattern is "answer first,
+   detail on demand" -- a reader who stops here should have the answer. */
+.answer-summary {
+  font-size: 1.02rem;
+  line-height: 1.55;
+  padding-left: 0.85rem;
+  border-left: 3px solid var(--accent);
+  margin-bottom: 1rem !important;
+}
+
+.answer-list {
+  margin: 0 0 0.75rem;
+  padding-left: 1.15rem;
+  list-style: none;
+}
+.answer-list:last-child { margin-bottom: 0; }
+.answer-list li {
+  position: relative;
+  margin-bottom: 0.55rem;
+  line-height: 1.6;
+}
+.answer-list li:last-child { margin-bottom: 0; }
+/* Hanging marker so the bold label starts at the text edge and the eye can run down
+   the labels alone -- the point of labelling the bullets in the first place. */
+.answer-list li::before {
+  content: '';
+  position: absolute;
+  left: -0.9rem;
+  top: 0.62em;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.answer-list strong { color: var(--ink); font-weight: 600; }
 
 .cite {
   display: inline;
