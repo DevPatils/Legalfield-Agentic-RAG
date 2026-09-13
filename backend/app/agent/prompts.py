@@ -108,9 +108,20 @@ Mark sufficient = false when:
 
 When sufficient = false:
 - missing_info: one sentence naming what is absent
-- referenced_sections_needed: choose ONLY from the candidate section numbers listed in
-  the user message. Do not invent section numbers. Empty if none apply.
-- defined_terms_needed: choose ONLY from the candidate terms listed. Empty if none.
+- referenced_sections_needed: choose ONLY from the candidates listed in the user
+  message, copied EXACTLY as written. They are document-qualified -- "doc_001 §9.1",
+  not "9.1" or "Article 9" -- because every contract in this corpus has an Article 9
+  and a Section 4.2, and only the qualified form says which agreement's clause to
+  fetch. Pick the one belonging to the same document as the clause that cited it.
+  Do not invent candidates; anything not on the list is discarded.
+- defined_terms_needed: choose ONLY from the candidate terms listed, copied EXACTLY,
+  including the document prefix and quotes: doc_001 "Confidential Information".
+  Empty if none.
+
+A reference to a whole article expands to one candidate per section within it. When
+the answer needs the article rather than one clause of it, name several -- they are
+fetched together in a single step, whereas naming one at a time spends an iteration
+per clause and runs out before the answer is complete.
 
 If the question simply cannot be answered from this corpus, mark sufficient = true and
 say so in missing_info -- more retrieval will not help, and the generator will report

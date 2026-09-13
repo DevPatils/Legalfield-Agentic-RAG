@@ -115,21 +115,56 @@ class TestMergeContext:
 class TestGraphCandidates:
     def test_referenced_but_absent_finds_the_gap(self):
         ctx = [chunk("4.2", refs=["13.9"], ref_ids=["doc_001__sec_13.9"])]
-        assert referenced_but_absent(ctx) == {"13.9": "doc_001__sec_13.9"}
+        assert referenced_but_absent(ctx) == {"doc_001 §13.9": "doc_001__sec_13.9"}
 
     def test_present_references_are_not_candidates(self):
         ctx = [chunk("4.2", refs=["13.9"], ref_ids=["doc_001__sec_13.9"]), chunk("13.9")]
         assert referenced_but_absent(ctx) == {}
 
+    def test_container_reference_offers_every_resolved_target(self):
+        """One label, eight ids: "Article 9" is deduplicated in ``cross_references``
+        but expands to a chunk per section in ``cross_reference_ids``. Pairing the
+        two lists positionally kept the first and dropped the other seven, which put
+        41% of the corpus's edges out of traversal's reach."""
+        ids = [f"doc_001__sec_9.{i}" for i in range(1, 9)]
+        ctx = [chunk("2.2.2", refs=["ART-9"], ref_ids=ids)]
+        assert referenced_but_absent(ctx) == {f"doc_001 §9.{i}": ids[i - 1] for i in range(1, 9)}
+
+    def test_same_section_number_in_two_documents_does_not_collide(self):
+        """Every contract in the corpus has an Article 9. Keying candidates by the
+        bare number let the last document in context overwrite the others, and
+        traversal then fetched the wrong agreement's clause."""
+        ctx = [
+            chunk("2.2.2", refs=["ART-9"], ref_ids=["doc_001__sec_9.1"]),
+            chunk("3.1", doc="doc_012", refs=["ART-9"], ref_ids=["doc_012__sec_9.1"]),
+        ]
+        assert referenced_but_absent(ctx) == {
+            "doc_001 §9.1": "doc_001__sec_9.1",
+            "doc_012 §9.1": "doc_012__sec_9.1",
+        }
+
+    def test_candidates_are_capped(self):
+        ids = [f"doc_001__sec_{i}" for i in range(200)]
+        assert len(referenced_but_absent([chunk("1.1", ref_ids=ids)], limit=40)) == 40
+
     def test_definitions_absent(self):
         ctx = [chunk("4.1", terms=["Confidential Information"], defn_ids=["doc_001__sec_1.3"])]
-        assert definitions_absent(ctx) == {"Confidential Information": "doc_001__sec_1.3"}
+        assert definitions_absent(ctx) == {
+            'doc_001 "Confidential Information"': "doc_001__sec_1.3"
+        }
 
     def test_definition_present_is_not_a_candidate(self):
         ctx = [
             chunk("4.1", terms=["Confidential Information"], defn_ids=["doc_001__sec_1.3"]),
             chunk("1.3"),
         ]
+        assert definitions_absent(ctx) == {}
+
+    def test_mismatched_definition_lists_are_skipped_not_mispaired(self):
+        """``definition_ids`` is built by a comprehension that filters, so it can end
+        up shorter than ``defined_terms_used``. Zipping them would then attach a term
+        to another term's clause -- confidently wrong, which is worse than absent."""
+        ctx = [chunk("4.1", terms=["Affiliate", "Territory"], defn_ids=["doc_001__sec_1.9"])]
         assert definitions_absent(ctx) == {}
 
     def test_handles_missing_payload_fields(self):

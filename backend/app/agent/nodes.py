@@ -281,18 +281,15 @@ def make_refine(deps: AgentDeps):
         section_candidates = referenced_but_absent(context)
         term_candidates = definitions_absent(context)
 
+        # Candidate keys are already the doc-qualified labels the sufficiency node
+        # showed the model, so they go straight into the trace as chosen.
         wanted_ids: list[str] = []
         pulled: list[str] = []
-        for section_id in state.get("sections_needed", []):
-            chunk_id = section_candidates.get(section_id)
+        for label in [*state.get("sections_needed", []), *state.get("terms_needed", [])]:
+            chunk_id = section_candidates.get(label) or term_candidates.get(label)
             if chunk_id and chunk_id not in wanted_ids:
                 wanted_ids.append(chunk_id)
-                pulled.append(section_id)
-        for term in state.get("terms_needed", []):
-            chunk_id = term_candidates.get(term)
-            if chunk_id and chunk_id not in wanted_ids:
-                wanted_ids.append(chunk_id)
-                pulled.append(f'"{term}"')
+                pulled.append(label)
 
         # Architecture.md §7: prefer graph traversal when the gap is an explicit
         # reference. It is a key lookup rather than a search -- cheaper, exact, and

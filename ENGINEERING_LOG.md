@@ -22,7 +22,7 @@ talking about:
   85 — long before anyone noticed a bad answer.
 
 Current state: 15 contracts, 2,878 chunks, 2,607 resolved cross-reference edges,
-8,943 definition edges, 154 passing tests.
+8,943 definition edges, 158 passing tests.
 
 ---
 
@@ -390,6 +390,75 @@ as a sentence boundary.
 The renderer was the obvious consumer; the verifier was the one that mattered.
 
 ---
+
+---
+
+## 16. Two lists that stopped being parallel, and 41% of the graph went dark
+
+**Symptom.** Traversal fired correctly on "what confidentiality obligations apply to a
+consultant attending a JGC meeting" — and fetched **doc_012's** Article 9, from an
+unrelated contract. It then did it twice more, one clause per iteration, hit the
+iteration cap and answered with low confidence. The sufficiency check was right every
+time: Article 9's actual terms were never in context.
+
+**Cause.** Two defects compounding, both in one function.
+
+At index time the two payload lists are built in lockstep and then only one of them is
+deduplicated ([chunker.py](backend/app/ingest/chunker.py)):
+
+```python
+c.cross_references    = _dedupe(targets)   # ['ART-9']    -- 1
+c.cross_reference_ids = target_ids         # 9.1 ... 9.8  -- 8
+```
+
+At query time they were zipped back together as though still parallel:
+
+```python
+for section_id, chunk_id in zip(refs, ids, strict=False):
+```
+
+`strict=False` takes one pair and discards seven, with no error. Measured across the
+corpus: **196 chunks misaligned, 1,065 of 2,607 edges — 41% — unreachable by
+traversal.** Every reference to a whole article resolved to its first section only.
+
+The second defect was the dictionary key:
+
+```python
+out[section_id] = chunk_id     # "ART-9"
+```
+
+All fifteen contracts have an Article 9. Each document in context overwrote the
+previous one's entry, so traversal fetched whichever agreement happened to sit last in
+the retrieved list — doc_012, in this case, because its §3.1 was ranked sixth.
+
+**Fix.** Treat the resolved ids as authoritative and derive the label from them, rather
+than trusting two lists to line up:
+
+```python
+for chunk_id in chunk.payload.get("cross_reference_ids") or []:
+    ...
+    out[label_for(chunk_id)] = chunk_id     # "doc_001 §9.1"
+```
+
+Structural chunk ids make the label a string split rather than a lookup. Three things
+fall out: all eight children of an article become candidates instead of one, the label
+is document-qualified so traversal can tell two Article 9s apart, and the sufficiency
+model can name several in one go — turning eight iterations into one. The same fix
+applies to the definitions path, where the lists are parallel across the corpus today
+but nothing enforces it; a length mismatch there is now skipped rather than paired off,
+because a term attached to the wrong clause is worse than a term with no clause.
+
+**No re-index was needed** — every id was already in the Qdrant payload, correct and
+complete. The indexer had been right the whole time; only the reader was wrong.
+
+**Generalizes to.** Two collections are only parallel if something keeps them that way.
+`_dedupe` on one and not the other silently broke an invariant three files away, and
+`zip(..., strict=False)` is precisely the construct that turns that breakage into
+missing data instead of an exception. Where one list is derivable from the other,
+derive it — don't store both and hope.
+
+This is the third bug in this log (with #5 and #12) whose entire shape is "a list was
+silently truncated to its first element." That is worth knowing about oneself.
 
 ## Still open
 
