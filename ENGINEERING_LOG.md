@@ -22,7 +22,7 @@ talking about:
   85 — long before anyone noticed a bad answer.
 
 Current state: 15 contracts, 2,878 chunks, 2,607 resolved cross-reference edges,
-8,943 definition edges, 170 passing tests.
+8,943 definition edges, 175 passing tests.
 
 ---
 
@@ -655,6 +655,77 @@ decision and was actually a fossil of a defect. The distinction is invisible in 
 diff -- the only way to tell them apart is to measure the distribution against the
 corpus, which takes about five minutes and is now in this file as a number rather than
 an intuition.
+
+---
+
+## 20. The agent fetched the answer, then threw it away
+
+**Symptom.** The most misleading failure in this project. Asked again for the Warranty
+Period, the system produced a fluent, correctly cited, carefully hedged answer whose
+central claim was:
+
+> No Term or duration clause appears in the retrieved excerpts ... the definition of
+> "Warranty Period" is likewise absent from the material provided.
+
+Both clauses had been fetched. By id. Two iterations earlier. The trace is unambiguous:
+
+```
+iter 1  sufficiency asks for: doc_008 "Warranty Period"
+iter 2  traversal fetches:    4.1__p1, 7.1__p1, 8.2, 1.1__p6   <- the definition
+iter 2  sufficiency: still insufficient, asks for 3.1
+iter 3  traversal fetches:    3.1, 2.2, 2.3                     <- the Term clause
+iter 3  still insufficient -> iteration cap -> low confidence
+```
+
+The agent identified the gap, followed the right edge, retrieved the right clause, put
+it in state — and then told the user it did not exist.
+
+**Cause.** `merge_context` appends, so anything traversal pulls lands at the back of
+the queue. Both the sufficiency node and the generate node then took
+`context[:MAX_CONTEXT_CHUNKS]`, a flat slice of the first twelve. Position of the two
+missing clauses in that queue: 14 and 15.
+
+Holding slots 1, 2, 3 and 6 ahead of them: four `UNNUM-*` chunks — title-page and
+signature-block fragments — returned by the iteration-0 search.
+
+The eviction policy was arrival order, and traversal results always arrive last. So the
+pipeline's most expensive and most deliberate work product was, structurally, the most
+likely thing to be discarded.
+
+It compounds. The *sufficiency* node reads the same slice, so at iteration 2 it could
+not see the clause it had asked for at iteration 1. Finding the gap apparently
+unfilled, it asked for different things, burned its remaining iterations, and hit the
+cap. Every symptom pointed at retrieval failing to find the definition. Retrieval had
+found it on the first try.
+
+**Fix.** `prioritized()` in [nodes.py](backend/app/agent/nodes.py) orders deliberate
+fetches — `graph_traversal` and `direct_lookup` — ahead of search hits before slicing.
+A chunk arrived at by following an edge was *named* as the gap by the sufficiency
+check; it outranks a search hit that check already judged insufficient. Search results
+keep their relevance order among themselves.
+
+Replayed against the exact failing context, §1.1__p6 and §3.1 both survive the cut and
+the four title-page fragments fall off the end.
+
+**Generalizes to.** An eviction policy should reflect *why* something is in the buffer,
+not *when* it arrived. Arrival order looked neutral and was in fact precisely inverted:
+the longer the agent worked to obtain a chunk, the later it arrived, and the more
+likely it was to be cut.
+
+Worth naming the second lesson separately, because it is the one that cost the time:
+the failure presented as the opposite of what it was. A retrieval system that reports
+"I could not find X" is normally telling you retrieval failed. Here retrieval had
+succeeded and a downstream buffer was lying about it, and the honest hedging in the
+generate prompt — "cannot be confirmed from these excerpts" — made a discarded-context
+bug read as a corpus-coverage limitation. The prompt was doing exactly what it was told
+and the sentence was true; it just was not the truth anyone needed.
+
+**Footnote.** This was only reachable because #19 had started offering the right
+candidate. Four entries in a row now (#16, #18, #19, #20) where fixing one layer made
+the next one visible. That is what it looks like to debug a pipeline from the outside
+in, and it is an argument for the trace being detailed enough to show which stage the
+data died at — every one of these was diagnosed from the stored trace, not from a
+reproduction.
 
 ## Still open
 

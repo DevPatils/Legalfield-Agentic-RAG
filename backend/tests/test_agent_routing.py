@@ -15,6 +15,7 @@ from app.agent.nodes import (
     _split_sentences,
     build_claims,
     format_clauses,
+    prioritized,
 )
 from app.agent.schemas import SufficiencyOutput
 from app.agent.state import (
@@ -459,3 +460,45 @@ def test_the_same_term_twice_is_offered_once():
         chunk("4.2", terms=["Warranty Period"], defn_ids=["doc_008__sec_1.1__p6"]),
     ]
     assert len(definitions_absent(ctx)) == 1
+
+
+class TestContextPriority:
+    """What survives the cut when context exceeds the prompt budget.
+
+    Traversal appends, so deliberately fetched clauses land at the back of the queue.
+    Slicing that queue discarded exactly what the sufficiency check had just asked for
+    -- and the answer then reported those clauses as absent from the record.
+    """
+
+    def _searched(self, sid):
+        c = chunk(sid)
+        c.source = "search"
+        return c
+
+    def _traversed(self, sid):
+        c = chunk(sid)
+        c.source = "graph_traversal"
+        return c
+
+    def test_traversed_chunks_survive_the_cut(self):
+        ctx = [self._searched(f"UNNUM-{i}") for i in range(12)] + [self._traversed("1.1__p6")]
+        kept = {c.section_id for c in prioritized(ctx, limit=12)}
+        assert "1.1__p6" in kept
+
+    def test_deliberate_chunks_come_first(self):
+        ctx = [self._searched("9.9"), self._traversed("1.1__p6"), self._searched("8.8")]
+        assert [c.section_id for c in prioritized(ctx)] == ["1.1__p6", "9.9", "8.8"]
+
+    def test_direct_lookups_rank_with_traversal(self):
+        direct = chunk("2.2.2")
+        direct.source = "direct_lookup"
+        ctx = [self._searched(f"UNNUM-{i}") for i in range(12)] + [direct]
+        assert prioritized(ctx, limit=12)[0].section_id == "2.2.2"
+
+    def test_search_order_is_preserved_among_the_rest(self):
+        ctx = [self._searched("1.1"), self._searched("2.2"), self._searched("3.3")]
+        assert [c.section_id for c in prioritized(ctx)] == ["1.1", "2.2", "3.3"]
+
+    def test_limit_is_respected(self):
+        ctx = [self._traversed(f"{i}.0") for i in range(20)]
+        assert len(prioritized(ctx, limit=12)) == 12

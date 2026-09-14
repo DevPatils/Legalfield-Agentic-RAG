@@ -47,6 +47,36 @@ RE_NAMED_SECTION = re.compile(
 
 MAX_CONTEXT_CHUNKS = 12
 
+# Chunks the agent went and fetched on purpose, rather than ones a search returned.
+DELIBERATE = ("graph_traversal", "direct_lookup")
+
+
+def prioritized(
+    context: list[RetrievedChunk], limit: int = MAX_CONTEXT_CHUNKS
+) -> list[RetrievedChunk]:
+    """The chunks to put in front of the model, deliberate fetches first.
+
+    ``merge_context`` appends, so anything traversal pulls lands at the back of the
+    queue -- behind the iteration-0 search hits, which on this corpus routinely
+    include title-page and signature-block fragments. Slicing that queue threw away
+    exactly the clauses the sufficiency check had just identified as the gap and sent
+    traversal to fetch.
+
+    It produced the most misleading failure in this project so far: a fluent, honest,
+    well-cited answer stating that the definition of "Warranty Period" was "absent
+    from the material provided", when the definition had been fetched by id two
+    iterations earlier and was sitting at position 14 of a list cut at 12. The
+    sufficiency node reads the same slice, so it could not see what it had asked for
+    either, and spent its remaining iterations asking for other things.
+
+    A chunk arrived at by following an edge was named as the gap. It outranks a search
+    hit that was already judged insufficient.
+    """
+    deliberate = [c for c in context if c.source in DELIBERATE]
+    searched = [c for c in context if c.source not in DELIBERATE]
+    return (deliberate + searched)[:limit]
+
+
 # A claim normally cites one clause and occasionally two. The cap is what stops a
 # claim that cites eight from quietly turning the per-citation check back into the
 # whole-context grounding score it exists to avoid.
@@ -217,7 +247,7 @@ def make_sufficiency(deps: AgentDeps):
         term_candidates = definitions_absent(context)
 
         parts = [f"Question: {state['raw_query']}", "", "Retrieved clauses:", ""]
-        parts.append(format_clauses(context[:MAX_CONTEXT_CHUNKS]))
+        parts.append(format_clauses(prioritized(context)))
         if section_candidates:
             parts += [
                 "",
@@ -367,7 +397,7 @@ def make_refine(deps: AgentDeps):
 
 def make_generate(deps: AgentDeps):
     def generate(state: AgentState) -> dict[str, Any]:
-        context = state.get("context", [])[:MAX_CONTEXT_CHUNKS]
+        context = prioritized(state.get("context", []))
 
         if not state.get("needs_retrieval", True):
             # Bulleted rather than the prompt's indented form: the answer renderer
