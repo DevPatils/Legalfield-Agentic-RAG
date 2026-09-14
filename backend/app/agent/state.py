@@ -108,11 +108,13 @@ def merge_context(
 # past a few dozen the model is choosing from noise, not reasoning about a gap.
 MAX_CANDIDATES = 40
 
-# Terms are capped harder than sections. Once traversal pulls in a *definitions* chunk
-# -- which it does, that being where definitions live -- that chunk uses scores of
-# defined terms and floods the list with a long tail of irrelevant ones. The labels are
-# also longer, and the model has to echo its choices back within a token budget.
-MAX_TERM_CANDIDATES = 20
+# Sized from the corpus rather than guessed. Sampling 12-chunk contexts across the
+# fifteen contracts: median 19 unique term candidates, p90 27, p99 43. A cap of 20 --
+# the first guess here -- truncated 38% of contexts; 40 truncates 1%. That guess was
+# made while fixing a token overrun, and it was defending against a flood that the
+# then-current deduplication bug was already suppressing, so the number it was tuned
+# against was never real.
+MAX_TERM_CANDIDATES = 40
 
 
 def doc_of(chunk_id: str) -> str:
@@ -185,7 +187,6 @@ def definitions_absent(
     sending it nowhere.
     """
     present = {c.chunk_id for c in context}
-    seen: set[str] = set()
     out: dict[str, str] = {}
     for chunk in context:
         payload = chunk.payload
@@ -194,12 +195,25 @@ def definitions_absent(
         if len(terms) != len(ids):
             continue
         for term, chunk_id in zip(terms, ids, strict=True):
-            if chunk_id in present or chunk_id in seen:
+            if chunk_id in present:
                 continue
-            seen.add(chunk_id)
+            # Deduplicate by TERM, not by target chunk. A contract's definitions
+            # article is a handful of chunks holding scores of definitions, so many
+            # distinct terms resolve to the same one. Skipping a term because its
+            # chunk was already claimed meant the first term to reach a definitions
+            # chunk locked out every other term defined beside it -- "QFCP-RC Tariff"
+            # from a preamble silenced "Warranty Period", which three clauses in
+            # context were actually asking for. At most one candidate per definitions
+            # chunk could ever be offered, and retrieval order picked which.
+            #
+            # Two terms mapping to one chunk is not waste: the refine node collapses
+            # wanted_ids before fetching, so the chunk is still fetched once.
+            label = f'{doc_of(chunk_id)} "{term}"'
+            if label in out:
+                continue
             # Doc-qualified for the same reason as sections: every contract in the
             # corpus defines "Confidential Information".
-            out[f'{doc_of(chunk_id)} "{term}"'] = chunk_id
+            out[label] = chunk_id
             if len(out) >= limit:
                 return out
     return out

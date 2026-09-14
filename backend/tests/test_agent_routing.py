@@ -428,11 +428,34 @@ class TestUnparseableResponse:
         assert _require_parsed(out, "sufficiency") is out
 
 
-def test_term_candidates_are_capped_harder_than_sections():
-    """A definitions chunk uses scores of terms; without a tighter cap it floods the
-    candidate list and the labels are longer than section ones."""
-    terms = [f"Term {i}" for i in range(50)]
-    ids = [f"doc_008__sec_1.1__p{i}" for i in range(50)]
+def test_term_candidates_are_capped():
+    terms = [f"Term {i}" for i in range(80)]
+    ids = [f"doc_008__sec_1.1__p{i}" for i in range(80)]
     ctx = [chunk("7.1", terms=terms, defn_ids=ids)]
     assert len(definitions_absent(ctx)) == MAX_TERM_CANDIDATES
-    assert MAX_TERM_CANDIDATES < MAX_CANDIDATES
+    assert MAX_CANDIDATES >= MAX_TERM_CANDIDATES
+
+
+def test_terms_sharing_a_definition_chunk_are_all_offered():
+    """A contract's definitions article is a few chunks holding scores of definitions,
+    so many distinct terms resolve to the same chunk. Deduplicating by target chunk
+    meant the first term to reach one locked out every other term defined beside it:
+    "QFCP-RC Tariff" from a preamble silenced "Warranty Period", which three clauses
+    in context were asking for, and the model never saw it as an option."""
+    ctx = [
+        chunk("UNNUM-5", terms=["QFCP-RC Tariff"], defn_ids=["doc_008__sec_1.1__p6"]),
+        chunk("3.1", terms=["Warranty Period"], defn_ids=["doc_008__sec_1.1__p6"]),
+    ]
+    out = definitions_absent(ctx)
+    assert out == {
+        'doc_008 "QFCP-RC Tariff"': "doc_008__sec_1.1__p6",
+        'doc_008 "Warranty Period"': "doc_008__sec_1.1__p6",
+    }
+
+
+def test_the_same_term_twice_is_offered_once():
+    ctx = [
+        chunk("3.1", terms=["Warranty Period"], defn_ids=["doc_008__sec_1.1__p6"]),
+        chunk("4.2", terms=["Warranty Period"], defn_ids=["doc_008__sec_1.1__p6"]),
+    ]
+    assert len(definitions_absent(ctx)) == 1

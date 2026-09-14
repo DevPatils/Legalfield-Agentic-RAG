@@ -22,7 +22,7 @@ talking about:
   85 — long before anyone noticed a bad answer.
 
 Current state: 15 contracts, 2,878 chunks, 2,607 resolved cross-reference edges,
-8,943 definition edges, 168 passing tests.
+8,943 definition edges, 170 passing tests.
 
 ---
 
@@ -587,6 +587,74 @@ protection; validating the value is.
 **Footnote.** This bug was reachable only because of the previous fix. That is the
 ordinary cost of changing a system's behaviour, not an argument against the change —
 but it is why #16 and #18 belong next to each other in this log.
+
+---
+
+## 19. One key for many things, again — and a constant tuned against a bug
+
+**Symptom.** Asked, explicitly, to include the Warranty Period, the answer closed with:
+
+> The Agreement does not state a fixed calendar length for the Warranty Period itself
+> in the clauses provided ... the actual duration cannot be confirmed from these
+> excerpts.
+
+Every word of that is true about the retrieved context and false about the contract.
+Section 1.1 defines Warranty Period as ending on the twenty-first anniversary of
+Commencement of Operations. The definition was indexed, and the graph had an edge
+pointing at it from the very clause the answer was citing.
+
+Nothing looked wrong. The generator hedged honestly, said "from these excerpts", and
+produced a careful, well-cited answer that simply omitted the thing that was asked for.
+
+**Cause.** `definitions_absent()` deduplicated candidates by the target **chunk id**,
+but the label the model chooses from is the **term**. A contract's definitions article
+is a handful of chunks holding scores of definitions -- six chunks and sixty-odd terms
+here, 155 terms in doc_001 -- so many distinct terms resolve to the same chunk. The
+first term to claim one locked out every term defined beside it:
+
+```
+1.1__p6  claimed by  "QFCP-RC Tariff"   (from the preamble)
+         also wanted by: REPS Act, Tariffs, Warranty Period, Residual Value
+```
+
+Three separate clauses in context were asking for Warranty Period. The sufficiency
+model was never shown it. Of roughly 37 term-uses across the context, 6 became
+candidates -- an upper bound of one per definitions chunk, with retrieval order
+deciding which one.
+
+This is #16's shape a second time: many distinct things collapsed onto one key, with
+first-writer-wins picking the survivor. It is also my own bug. The `seen` set came from
+the #16 fix, where a label maps to exactly one chunk and deduplicating by either is the
+same thing. Carried over to terms, where the mapping is many-to-one, it silently
+deleted most of the candidates.
+
+**Fix.** Deduplicate by label. Two terms pointing at one chunk is not waste -- the
+refine node already collapses `wanted_ids` before fetching, so the chunk is fetched
+once regardless. On the failing context the candidate list went from 6 to 29, with
+`doc_008 "Warranty Period"` among them.
+
+**The second half is worse than the first.** `MAX_TERM_CANDIDATES` was 20, set in #18
+while fixing a token overrun, on the reasoning that definitions chunks would flood the
+list. Measuring the corpus afterwards -- 12-chunk contexts sampled across the fifteen
+contracts -- gives a median of 19 unique terms, p90 of 27, p99 of 43. A cap of 20
+truncates 38% of contexts; 40 truncates 1%.
+
+So the cap was not merely wrong, it was *tuned against the bug*. The flood it was
+defending against was being suppressed by the very deduplication defect that was
+throwing away the candidates, and the observed distribution it was fitted to had been
+produced by broken code. Fixing the dedup would have re-broken this case immediately
+through the cap instead, one layer along, and the symptom would have looked identical.
+
+**Generalizes to.** Deduplicate by the key your consumer actually uses, not by an
+identifier that happens to be nearby. Here the consumer is a language model choosing
+from a list of names; two names are two choices even when they lead to the same file.
+
+And: a constant chosen by eyeballing a system's behaviour encodes whatever that system
+was doing at the time, bugs included. `MAX_TERM_CANDIDATES = 20` looked like a tuning
+decision and was actually a fossil of a defect. The distinction is invisible in the
+diff -- the only way to tell them apart is to measure the distribution against the
+corpus, which takes about five minutes and is now in this file as a number rather than
+an intuition.
 
 ## Still open
 
