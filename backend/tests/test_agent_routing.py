@@ -9,8 +9,17 @@ from app.agent.graph import (
     route_after_planner,
     route_after_refine,
 )
-from app.agent.nodes import RE_CITATION, _split_sentences, format_clauses
+from app.agent.llm import _require_parsed
+from app.agent.nodes import (
+    RE_CITATION,
+    _split_sentences,
+    build_claims,
+    format_clauses,
+)
+from app.agent.schemas import SufficiencyOutput
 from app.agent.state import (
+    MAX_CANDIDATES,
+    MAX_TERM_CANDIDATES,
     definitions_absent,
     merge_context,
     new_state,
@@ -345,3 +354,85 @@ def test_split_sentences_does_not_break_on_section_numbers():
         "of the contract [doc_001 §4.2]."
     )
     assert len(_split_sentences(answer)) == 1
+
+
+class TestClaimEvidence:
+    """What the faithfulness check is shown for each claim.
+
+    The invariant is narrow and load-bearing: a claim sees every clause it cited and
+    nothing else. Widening it to the whole context degrades the check into an overall
+    grounding score; narrowing it to the first citation flags correct answers.
+    """
+
+    def test_claim_gets_every_clause_it_cited(self):
+        """The regression. A consultant's confidentiality duty is imposed by §2.2.2
+        and defined by §9.2, and the answer cited both -- exactly as GENERATE_SYSTEM
+        instructs. Pairing only the first citation flagged it as unsupported."""
+        ctx = [
+            chunk("2.2.2", text="attendees are bound by obligations equivalent to Article 9"),
+            chunk("9.2", text="each Party shall not disclose to a Third Party and not use"),
+        ]
+        answer = "Attendees owe equivalent duties [doc_001 §2.2.2] [doc_001 §9.2]."
+        claims = build_claims(answer, ctx)
+        assert len(claims) == 1
+        assert "equivalent to Article 9" in claims[0]
+        assert "not disclose to a Third Party" in claims[0]
+
+    def test_uncited_context_is_never_shown(self):
+        ctx = [chunk("4.1", text="cited body"), chunk("8.8", text="UNCITED BODY")]
+        claims = build_claims("A claim [doc_001 §4.1].", ctx)
+        assert "UNCITED BODY" not in claims[0]
+
+    def test_claims_without_citations_are_skipped(self):
+        ctx = [chunk("4.1", text="body")]
+        assert build_claims("This sentence cites nothing.", ctx) == []
+
+    def test_citation_to_a_chunk_not_in_context_is_skipped(self):
+        """A hallucinated tag is stripped upstream; if one survives, it must not
+        produce a claim with no evidence attached."""
+        ctx = [chunk("4.1", text="body")]
+        assert build_claims("A claim [doc_001 §99.9].", ctx) == []
+
+    def test_repeated_citation_is_not_duplicated(self):
+        ctx = [chunk("4.1", text="body")]
+        claims = build_claims("A [doc_001 §4.1] and again [doc_001 §4.1].", ctx)
+        assert claims[0].count("CITED CLAUSE") == 1
+
+    def test_evidence_is_capped(self):
+        ctx = [chunk(f"{i}.0", text=f"body{i}") for i in range(6)]
+        tags = " ".join(f"[doc_001 §{i}.0]" for i in range(6))
+        claims = build_claims(f"A claim {tags}.", ctx)
+        assert claims[0].count("CITED CLAUSE") == 3
+
+
+class TestUnparseableResponse:
+    """``messages.parse`` returns None instead of raising when the model produces
+    nothing matching the schema. The nodes guard with try/except, which catches raises
+    only -- so a None escaped the guard and killed the run. Architecture.md §7 requires
+    the graph to degrade, not fail closed."""
+
+    def test_none_becomes_an_exception(self):
+        import pytest
+
+        with pytest.raises(RuntimeError, match="no parseable output"):
+            _require_parsed(None, "sufficiency", "max_tokens")
+
+    def test_stop_reason_is_reported(self):
+        import pytest
+
+        with pytest.raises(RuntimeError, match="max_tokens"):
+            _require_parsed(None, "sufficiency", "max_tokens")
+
+    def test_a_real_result_passes_through(self):
+        out = SufficiencyOutput(sufficient=True)
+        assert _require_parsed(out, "sufficiency") is out
+
+
+def test_term_candidates_are_capped_harder_than_sections():
+    """A definitions chunk uses scores of terms; without a tighter cap it floods the
+    candidate list and the labels are longer than section ones."""
+    terms = [f"Term {i}" for i in range(50)]
+    ids = [f"doc_008__sec_1.1__p{i}" for i in range(50)]
+    ctx = [chunk("7.1", terms=terms, defn_ids=ids)]
+    assert len(definitions_absent(ctx)) == MAX_TERM_CANDIDATES
+    assert MAX_TERM_CANDIDATES < MAX_CANDIDATES

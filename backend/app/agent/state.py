@@ -108,6 +108,12 @@ def merge_context(
 # past a few dozen the model is choosing from noise, not reasoning about a gap.
 MAX_CANDIDATES = 40
 
+# Terms are capped harder than sections. Once traversal pulls in a *definitions* chunk
+# -- which it does, that being where definitions live -- that chunk uses scores of
+# defined terms and floods the list with a long tail of irrelevant ones. The labels are
+# also longer, and the model has to echo its choices back within a token budget.
+MAX_TERM_CANDIDATES = 20
+
 
 def doc_of(chunk_id: str) -> str:
     """``doc_001__sec_9.1`` -> ``doc_001``. Structural ids make this a split, not a
@@ -165,7 +171,7 @@ def referenced_but_absent(
 
 
 def definitions_absent(
-    context: list[RetrievedChunk], limit: int = MAX_CANDIDATES
+    context: list[RetrievedChunk], limit: int = MAX_TERM_CANDIDATES
 ) -> dict[str, str]:
     """Defined terms used in context whose defining clause is not in context.
 

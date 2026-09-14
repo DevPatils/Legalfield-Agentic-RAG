@@ -185,7 +185,7 @@ export default function TracePanel({ trace, running, onOpenClause }) {
               detail={
                 flagged.length
                   ? undefined
-                  : 'Each claim was entailment-checked against only its own cited clause.'
+                  : 'Each claim was entailment-checked against only the clauses it cited.'
               }
             >
               {flagged.map((flag, j) => (

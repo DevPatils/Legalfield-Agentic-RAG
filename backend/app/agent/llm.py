@@ -54,6 +54,24 @@ class UsageLog:
         }
 
 
+def _require_parsed(parsed: T | None, node: str, stop_reason: str = "") -> T:
+    """Turn an unparseable response into an exception instead of a ``None``.
+
+    ``messages.parse`` returns ``parsed_output=None`` rather than raising when the model
+    does not produce something matching the schema -- most often because it hit
+    ``max_tokens`` part-way through the structure. Every node wraps its call in
+    try/except and degrades to a defensible default, but that guard only catches
+    raises: a None slipped past it and blew up on the next attribute access, outside
+    the guard, killing the whole run and returning no answer at all. Architecture.md §7
+    requires the graph to degrade rather than fail closed, and this is the line that
+    decides which of the two happens.
+    """
+    if parsed is None:
+        detail = f" (stop_reason={stop_reason})" if stop_reason else ""
+        raise RuntimeError(f"{node or 'llm'}: model returned no parseable output{detail}")
+    return parsed
+
+
 class LLMClient(Protocol):
     def parse(
         self,
@@ -103,7 +121,7 @@ class AnthropicLLM:
                 output_tokens=getattr(response.usage, "output_tokens", 0),
             )
         )
-        return response.parsed_output
+        return _require_parsed(response.parsed_output, node, getattr(response, "stop_reason", ""))
 
 
 class OpenAILLM:

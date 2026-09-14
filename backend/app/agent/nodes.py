@@ -47,6 +47,11 @@ RE_NAMED_SECTION = re.compile(
 
 MAX_CONTEXT_CHUNKS = 12
 
+# A claim normally cites one clause and occasionally two. The cap is what stops a
+# claim that cites eight from quietly turning the per-citation check back into the
+# whole-context grounding score it exists to avoid.
+MAX_CITED_PER_CLAIM = 3
+
 
 def sections_named_in(query: str) -> list[str]:
     """Section numbers the user asked for by name.
@@ -234,7 +239,10 @@ def make_sufficiency(deps: AgentDeps):
                 user="\n".join(parts),
                 schema=SufficiencyOutput,
                 node="sufficiency",
-                max_tokens=1024,
+                # Doc-qualified candidate labels are long and the model may name
+                # several; 1024 left it running out mid-structure once the candidate
+                # list grew, which produced an unparseable response.
+                max_tokens=2048,
             )
         except Exception as exc:  # noqa: BLE001
             # Proceed to Generate rather than looping on a broken check.
@@ -477,6 +485,40 @@ def make_generate(deps: AgentDeps):
 # --------------------------------------------------------------------- faithfulness
 
 
+def build_claims(answer: str, context: list[RetrievedChunk]) -> list[str]:
+    """Pair each claim in the answer with the clauses it cites, for entailment checking.
+
+    Each claim is paired with ONLY its own cited clauses. Passing the whole context
+    would let a claim be "supported" by some other clause that happened to be
+    retrieved, which turns a per-citation check into a vague overall grounding score.
+
+    "Its own cited clauses" means all of them, not the first. GENERATE_SYSTEM tells the
+    model that two clauses supporting one claim get two citations, so pairing only
+    ``found[0]`` checked a compliant answer against half its evidence -- and flagged a
+    correct claim about consultants' confidentiality duties because the rule sat in
+    §2.2.2 and the substance in §9.2. The generator and the verifier have to agree on
+    what a claim's evidence is. Isolation survives either way: the claim still sees
+    only what it cited.
+    """
+    by_key = {(c.doc_id, c.section_id): c for c in context}
+    claims: list[str] = []
+    for sentence in _split_sentences(answer):
+        found = RE_CITATION.findall(sentence)
+        if not found:
+            continue
+        # dict.fromkeys de-duplicates a claim that cites the same clause twice while
+        # keeping the order the answer wrote them in.
+        cited = [by_key[key] for key in dict.fromkeys(found) if key in by_key]
+        if not cited:
+            continue
+        evidence = "\n\n".join(
+            f"CITED CLAUSE [{c.doc_id} §{c.section_id}]:\n{c.text}"
+            for c in cited[:MAX_CITED_PER_CLAIM]
+        )
+        claims.append(f"CLAIM {len(claims) + 1}: {sentence.strip()}\n{evidence}")
+    return claims
+
+
 def make_faithfulness(deps: AgentDeps):
     def faithfulness(state: AgentState) -> dict[str, Any]:
         # The summary carries claims like any other line, and is the one line a reader
@@ -486,24 +528,7 @@ def make_faithfulness(deps: AgentDeps):
         if not answer or not citations:
             return {"faithfulness": {"claims_checked": 0, "flagged": [], "skipped": True}}
 
-        by_key = {(c.doc_id, c.section_id): c for c in state.get("context", [])}
-
-        # Each claim is paired with ONLY its own cited clause. Passing the whole
-        # context would let a claim be "supported" by some other clause, which turns
-        # a per-citation check into a vague overall grounding score.
-        claims: list[str] = []
-        for sentence in _split_sentences(answer):
-            found = RE_CITATION.findall(sentence)
-            if not found:
-                continue
-            doc_id, section_id = found[0]
-            chunk = by_key.get((doc_id, section_id))
-            if chunk is None:
-                continue
-            claims.append(
-                f"CLAIM {len(claims) + 1}: {sentence.strip()}\n"
-                f"CITED CLAUSE [{doc_id} §{section_id}]:\n{chunk.text}"
-            )
+        claims = build_claims(answer, state.get("context", []))
 
         if not claims:
             return {"faithfulness": {"claims_checked": 0, "flagged": [], "skipped": True}}

@@ -223,13 +223,18 @@ No preamble, no restating the question, no closing summary of what you just wrot
 FAITHFULNESS_SYSTEM = """\
 You verify that claims in an answer are supported by the clause each one cites.
 
-You will be given numbered claims. Each comes with the text of the ONE clause it
-cited. Judge each claim against only that clause -- not against your own knowledge of
-contracts, and not against the other claims' clauses.
+You will be given numbered claims. Each comes with the full text of every clause that
+claim cites -- usually one, sometimes two when the claim rests on a rule in one clause
+and its substance in another. Judge each claim against those clauses and nothing else:
+not against your own knowledge of contracts, and not against the other claims' clauses.
 
-supported = true  -- the cited clause states or directly entails the claim
-supported = false -- the clause does not support it, contradicts it, or supports only
+supported = true  -- the cited clauses, taken together, state or directly entail the
+                    claim. It does not matter which of them carries which part.
+supported = false -- the clauses do not support it, contradict it, or support only
                     part of it
+
+A claim that cites two clauses is not unsupported merely because the first one alone
+does not carry it. Read all of them before deciding.
 
 Common failures worth catching:
 - the claim adds a condition, exception, time period, or amount the clause does not state

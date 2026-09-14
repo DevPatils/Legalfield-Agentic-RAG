@@ -22,7 +22,7 @@ talking about:
   85 — long before anyone noticed a bad answer.
 
 Current state: 15 contracts, 2,878 chunks, 2,607 resolved cross-reference edges,
-8,943 definition edges, 158 passing tests.
+8,943 definition edges, 168 passing tests.
 
 ---
 
@@ -459,6 +459,134 @@ derive it — don't store both and hope.
 
 This is the third bug in this log (with #5 and #12) whose entire shape is "a list was
 silently truncated to its first element." That is worth knowing about oneself.
+
+---
+
+## 17. The generator and the verifier disagreed about what evidence is
+
+**Symptom.** With the traversal fix in place, the consultant question finally reached
+doc_001's Article 9 — and the faithfulness check flagged the answer's best claim. The
+claim said non-representative attendees owe duties "equivalent to those set forth in
+Article 9, meaning… not disclosing it to third parties, and not using it outside the
+Agreement's purposes," citing both §2.2.2 and §9.2. The checker objected that §2.2.2
+does not contain those specifics.
+
+It was right about §2.2.2. And §9.2 says almost verbatim: "keep confidential and not
+publish or otherwise disclose to a Third Party and not use, directly or indirectly, for
+any purpose." The claim was well supported. The checker had never been shown the clause
+that supported it.
+
+**Cause.** The claim was paired with its first citation only:
+
+```python
+found = RE_CITATION.findall(sentence)
+doc_id, section_id = found[0]
+```
+
+Meanwhile GENERATE_SYSTEM instructs: "One citation per claim. Two clauses supporting
+one claim get two citations." So the generator was told to cite both, did, and was
+penalised for it. Two components with an unstated disagreement about what constitutes a
+claim's evidence — the kind of bug that lives in the gap between two files, where
+neither one looks wrong on its own.
+
+**Fix.** `build_claims()` in [nodes.py](backend/app/agent/nodes.py) attaches every
+clause a claim cites, capped at three. The isolation property the check exists for is
+untouched: a claim still sees only what it cited, never the surrounding context. The
+cap is what keeps "every clause it cited" from drifting back toward "the whole
+context" for a claim that cites eight.
+
+Extracted as a pure function so the invariant is testable without an LLM. Six tests now
+pin it: both clauses attached, uncited context never shown, repeated citations
+de-duplicated, hallucinated tags dropped, evidence capped.
+
+**Generalizes to.** When one component produces a format and another consumes it, the
+contract between them is real whether or not anyone wrote it down. Here it was written
+down — in the generate prompt — and the consumer had simply never been updated to
+match.
+
+And this is the **fourth** bug in this log whose entire shape is *a list silently
+truncated to its first element*: the `^` anchor (#5), `texts.index()` (#12), the
+mismatched `zip` (#16), and now `found[0]`. Four instances is not coincidence, it is a
+habit. The common thread is that all four were written while thinking about the
+singular case — one reference, one cost, one edge, one citation — in code whose type is
+plural. None of them raised; each returned a plausible answer built on a fraction of
+the data. Worth a standing rule: when indexing `[0]` out of a collection, say out loud
+why the rest cannot matter.
+
+**Footnote.** Applying this fix reproduced #10 — a heredoc mangled the string escapes
+and wrote literal newlines into a Python string literal, exactly as recorded. The log
+entry saying "use the Edit tool for this" existed and was not read. A lesson written
+down is not the same as a lesson learned.
+
+---
+
+## 18. A type annotation that lied, and a guard that only caught half the failures
+
+**Symptom.** "(no answer returned)", 0 citations, 3 iterations. The trace ended at a
+REFINE step with no generate and no faithfulness. The run had died silently.
+
+What had gone *right* first is worth recording: this query chained both traversal
+types for the first time. Section 4.1 (Default) points at Section 7.1 (Aggregate Limit
+of Liability) by cross-reference; Section 7.1 leans on "Maximum Liability", a term
+defined thirty pages earlier. The agent followed the reference edge, then followed the
+definitional edge, both by id, no second search. Then it fell over.
+
+**Cause.** `AnthropicLLM.parse()` is annotated to return a validated model:
+
+```python
+def parse(..., schema: type[T], ...) -> T:
+    ...
+    return response.parsed_output
+```
+
+`messages.parse` does not raise when the model fails to produce something matching the
+schema — it hands back `parsed_output=None`. Usually that means the response hit
+`max_tokens` part-way through the JSON. Every node wraps its call:
+
+```python
+try:
+    out = deps.llm.parse(...)
+except Exception:
+    ...degrade to a defensible default
+```
+
+That guard catches raises. A `None` walks straight past it and detonates on the next
+line, `out.referenced_sections_needed` — outside the try — which propagates up and
+kills the entire graph run. `last_node: error`, no answer, nothing rendered.
+
+The trigger was #16. Doc-qualifying the candidate labels made them longer, and once
+traversal reached a *definitions* chunk — which is exactly where traversal goes when
+a term is missing — that chunk contributed a long tail of defined terms. At
+`max_tokens=1024` the sufficiency model ran out mid-structure.
+
+**Fix.** Three parts, in order of importance:
+
+1. `_require_parsed()` raises instead of returning None, naming the node and the
+   `stop_reason`. This is the whole fix: it turns a run-killing crash into an
+   exception the existing per-node guards already know how to absorb.
+2. Terms are capped at 20 against 40 for sections, because definitions chunks flood
+   the list and their labels are longer.
+3. The sufficiency call gets 2048 tokens rather than 1024.
+
+Verified by handing the sufficiency node a client that returns None the way the SDK
+did: it now reports `sufficiency check failed: model returned no parseable output
+(stop_reason=max_tokens)` and returns `sufficient=True`, so the graph proceeds to
+generate and answers from what it has.
+
+**Generalizes to.** Two things, and the second is the one that cost the time.
+
+A return type of `T` that can be `None` is a lie the type checker cannot catch at a
+boundary like this, and every caller downstream is written against the lie.
+
+And a `try/except` around a call is not a guard on the *result* of that call. This one
+looked complete — it was the same shape as the guards on every other node, it had a
+sensible fallback, and it had been reviewed. It simply protected the wrong line. When
+a failure mode is "returns a bad value" rather than "raises", exception handling is not
+protection; validating the value is.
+
+**Footnote.** This bug was reachable only because of the previous fix. That is the
+ordinary cost of changing a system's behaviour, not an argument against the change —
+but it is why #16 and #18 belong next to each other in this log.
 
 ## Still open
 
